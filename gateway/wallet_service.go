@@ -655,19 +655,24 @@ func (w *WalletServiceImpl) SubmitRingForP2P(p2pRing P2PRingRequest) (res string
 		return res, errors.New(P2P_50003)
 	}
 
-	if taker.RawOrder.AmountS.Cmp(maker.RawOrder.AmountB) != 0 || taker.RawOrder.AmountB.Cmp(maker.RawOrder.AmountS) != 0 {
-		//return res, errors.New("the amount of maker and taker are not matched")
-		return res, errors.New(P2P_50004)
-	}
-
 	if taker.RawOrder.Owner.Hex() == maker.RawOrder.Owner.Hex() {
 		//return res, errors.New("taker and maker's address can't be same")
 		return res, errors.New(P2P_50005)
 	}
 
-	if manager.IsP2PMakerLocked(maker.RawOrder.Hash.Hex()) {
-		//return res, errors.New("maker order has been locked by other taker or expired")
-		return res, errors.New(P2P_50006)
+	if manager.IsDustyOrder(maker) {
+		//return res, errors.New("It's dusty order")
+		return res, errors.New(P2P_50003)
+	}
+
+	remainedAmountS, _ := maker.RemainedAmount()
+	if pendingAmountB, err := manager.GetP2PPendingAmount(maker.RawOrder.Hash.Hex()); nil != err {
+		if pendingAmountB.Cmp(remainedAmountS) > 0 {
+			//return res, errors.New("maker's remainedAmount is not ")
+			return res, errors.New(P2P_50004)
+		}
+	} else {
+		return res, err
 	}
 
 	var txHashRst string
@@ -676,7 +681,7 @@ func (w *WalletServiceImpl) SubmitRingForP2P(p2pRing P2PRingRequest) (res string
 		return res, err
 	}
 
-	err = manager.SaveP2POrderRelation(taker.RawOrder.Owner.Hex(), taker.RawOrder.Hash.Hex(), maker.RawOrder.Owner.Hex(), maker.RawOrder.Hash.Hex(), txHashRst)
+	err = manager.SaveP2POrderRelation(taker.RawOrder.Owner.Hex(), taker.RawOrder.Hash.Hex(), maker.RawOrder.Owner.Hex(), maker.RawOrder.Hash.Hex(), txHashRst, taker.RawOrder.AmountB.String())
 	if err != nil {
 		return res, errors.New(SYS_10001)
 	}
@@ -967,8 +972,8 @@ func (w *WalletServiceImpl) GetAllEstimatedAllocatedAmount(query EstimatedAlloca
 		return resultMap, errors.New("owner and delegateAddress must be applied")
 	}
 
-
-	allOrders, err := w.getAllOrdersByOwner(query.Owner, query.DelegateAddress); if err != nil {
+	allOrders, err := w.getAllOrdersByOwner(query.Owner, query.DelegateAddress)
+	if err != nil {
 		return resultMap, err
 	}
 
@@ -981,7 +986,8 @@ func (w *WalletServiceImpl) GetAllEstimatedAllocatedAmount(query EstimatedAlloca
 	for _, v := range allOrders {
 		token := util.AddressToAlias(v.RawOrder.TokenS.Hex())
 		amountS, _ := v.RemainedAmount()
-		amount, ok := tmpResult[token]; if ok {
+		amount, ok := tmpResult[token]
+		if ok {
 			amount = amount.Add(amount, amountS.Num())
 		} else {
 			tmpResult[token] = amountS.Num()
@@ -997,21 +1003,23 @@ func (w *WalletServiceImpl) GetAllEstimatedAllocatedAmount(query EstimatedAlloca
 	return resultMap, err
 }
 
-func (w *WalletServiceImpl) getAllOrdersByOwner(owner, delegateAddress string) (orders []types.OrderState, err error){
+func (w *WalletServiceImpl) getAllOrdersByOwner(owner, delegateAddress string) (orders []types.OrderState, err error) {
 
 	allOrders := make([]interface{}, 0)
 
-	orderQuery := OrderQuery{Owner:owner, DelegateAddress:delegateAddress, PageIndex:1, PageSize:200, Status:"ORDER_OPENED"}
-	pageRst, err := w.orderViewer.GetOrders(convertFromQuery(&orderQuery)); if err != nil {
+	orderQuery := OrderQuery{Owner: owner, DelegateAddress: delegateAddress, PageIndex: 1, PageSize: 200, Status: "ORDER_OPENED"}
+	pageRst, err := w.orderViewer.GetOrders(convertFromQuery(&orderQuery))
+	if err != nil {
 		return orders, err
 	}
 
 	allOrders = append(allOrders, pageRst.Data[:]...)
 
 	if pageRst.Total > 200 {
-		for i := 2; i < (pageRst.Total / 200) + 1; i++ {
-			orderQuery = OrderQuery{Owner:owner, DelegateAddress:delegateAddress, PageIndex:i, PageSize:200, Status:"ORDER_OPENED"}
-			pageRst, err = w.orderViewer.GetOrders(convertFromQuery(&orderQuery)); if err != nil {
+		for i := 2; i < (pageRst.Total/200)+1; i++ {
+			orderQuery = OrderQuery{Owner: owner, DelegateAddress: delegateAddress, PageIndex: i, PageSize: 200, Status: "ORDER_OPENED"}
+			pageRst, err = w.orderViewer.GetOrders(convertFromQuery(&orderQuery))
+			if err != nil {
 				return orders, err
 			}
 			allOrders = append(allOrders, pageRst.Data[:]...)
