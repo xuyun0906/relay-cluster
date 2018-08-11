@@ -1,6 +1,8 @@
-ALB 是aws提供的负载局衡器，ALB本身还有比较高的可用性，本身不存在单点故障问题
+# 部署Aws LoadBalancer
 
-通过把一组服务器映射到目标组，然后关联ALB，我们可以配置请求url和后端服务的对应关系
+ALB（Application Load Balancer）是aws提供的负载均衡器，具有较高的可用性。
+
+通过把一组服务器映射到目标组，然后关联ALB，实现配置请求url和后端服务的映射关系，将请求转发到正确的后端接口
 
 ## 配置目标组
 目标组将一组服务器的某个端口汇总为一个组，该组作为ALB的的请求转发目标
@@ -54,7 +56,7 @@ ALB 是aws提供的负载局衡器，ALB本身还有比较高的可用性，本�
 
 【侦听器】，添加HTTP，端口选择默认的80。如果在证书颁发机构申请了证书，请额外添加HTTPS侦听器
 
-【可用区】选择你部署了relay-cluster的所有可用区，至少选择连个区
+【可用区】选择你部署了relay-cluster的所有可用区，至少选择两个区
 
 * 步骤 2: 配置安全设置
 如果已经在证书颁发机构申请了https的证书，请在这里配置该证书，安全策略选择`ELBSecurityPolicy-2016-08`
@@ -91,3 +93,9 @@ ALB 是aws提供的负载局衡器，ALB本身还有比较高的可用性，本�
 ALB配置完成后，就可以通过ALB来请求后端服务。
 
 点击创建的`relayCluster`负载均衡器，在【描述】tab中，找到【DNS 名称】对应的值，该域名加上之前配置的路由url就可以访问relay-cluster和ethnode的相关接口
+
+## 查看ALB访问日志
+有时需要通过ALB访问日志分析问题，默认该日志功能是禁用的，需要通过配置来打开日志记录功能。
+
+具体操作可参考[aws doc](https://docs.aws.amazon.com/zh_cn/elasticloadbalancing/latest/application/load-balancer-access-logs.html)
+

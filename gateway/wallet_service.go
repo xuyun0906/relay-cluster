@@ -205,6 +205,11 @@ type EstimatedAllocatedAllowanceQuery struct {
 	Token           string `json: "token"`
 }
 
+type EstimatedAllocatedAllowanceResult struct {
+	AllocatedResult map[string]string `json:"allocatedResult"`
+	FrozenLrcFee    string            `json: "frozenLrcFee"`
+}
+
 type TransactionQuery struct {
 	ThxHash   string   `json:"thxHash"`
 	Owner     string   `json:"owner"`
@@ -217,15 +222,16 @@ type TransactionQuery struct {
 }
 
 type OrderQuery struct {
-	Status          string `json:"status"`
-	PageIndex       int    `json:"pageIndex"`
-	PageSize        int    `json:"pageSize"`
-	DelegateAddress string `json:"delegateAddress"`
-	Owner           string `json:"owner"`
-	Market          string `json:"market"`
-	OrderHash       string `json:"orderHash"`
-	Side            string `json:"side"`
-	OrderType       string `json:"orderType"`
+	Status          string   `json:"status"`
+	PageIndex       int      `json:"pageIndex"`
+	PageSize        int      `json:"pageSize"`
+	DelegateAddress string   `json:"delegateAddress"`
+	Owner           string   `json:"owner"`
+	Market          string   `json:"market"`
+	OrderHash       string   `json:"orderHash"`
+	OrderHashes     []string `json:"orderHashes"`
+	Side            string   `json:"side"`
+	OrderType       string   `json:"orderType"`
 }
 
 type DepthQuery struct {
@@ -334,14 +340,16 @@ type AccountJson struct {
 }
 
 type LatestFill struct {
-	CreateTime int64   `json:"createTime"`
-	Price      float64 `json:"price"`
-	Amount     float64 `json:"amount"`
-	Side       string  `json:"side"`
-	RingHash   string  `json:"ringHash"`
-	LrcFee     string  `json:"lrcFee"`
-	SplitS     string  `json:"splitS"`
-	SplitB     string  `json:"splitB"`
+	CreateTime   int64   `json:"createTime"`
+	Price        float64 `json:"price"`
+	Amount       float64 `json:"amount"`
+	Side         string  `json:"side"`
+	RingHash     string  `json:"ringHash"`
+	LrcFee       string  `json:"lrcFee"`
+	SplitS       string  `json:"splitS"`
+	SplitB       string  `json:"splitB"`
+	OrderHash    string  `json:"orderHash"`
+	PreOrderHash string  `json:"preOrderHash"`
 }
 
 type CancelOrderQuery struct {
@@ -386,6 +394,13 @@ type P2PRingRequest struct {
 	//Taker          *types.OrderJsonRequest `json:"taker"`
 	TakerOrderHash string `json:"takerOrderHash"`
 	MakerOrderHash string `json:"makerOrderHash"`
+}
+
+type AddTokenReq struct {
+	Owner                string `json:"owner"`
+	TokenContractAddress string `json:"tokenContractAddress"`
+	Symbol               string `json:"symbol"`
+	Decimals             int64  `json:"decimals"`
 }
 
 type WalletServiceImpl struct {
@@ -547,12 +562,19 @@ func (w *WalletServiceImpl) NotifyTransactionSubmitted(txNotify TxNotify) (resul
 
 	err = txmanager.ValidateNonce(txNotify.From, nonce)
 	if err != nil {
+		log.Infof("nonce invalid in tx %s, %s", txNotify.Hash, err.Error())
 		return "", err
 	}
 
 	tx := &ethtyp.Transaction{}
 	tx.Hash = txNotify.Hash
-	tx.Input = txNotify.Input
+
+	if len(txNotify.Input) > 2 && !strings.HasPrefix(txNotify.Input, "0x") && !strings.HasPrefix(txNotify.Input, "0X") {
+		tx.Input = "0x" + txNotify.Input
+	} else {
+		tx.Input = txNotify.Input
+	}
+
 	tx.From = txNotify.From
 	tx.To = txNotify.To
 	tx.Gas = *types.NewBigPtr(types.HexToBigint(txNotify.Gas))
@@ -573,7 +595,6 @@ func (w *WalletServiceImpl) NotifyTransactionSubmitted(txNotify TxNotify) (resul
 	tx.TransactionIndex = *types.NewBigWithInt(0)
 
 	log.Debug("emit Pending tx >>>>>>>>>>>>>>>> " + tx.Hash)
-	//eventemitter.Emit(eventemitter.PendingTransaction, tx)
 	kafkaUtil.ProducerNormalMessage(kafka.Kafka_Topic_Extractor_PendingTransaction, tx)
 	txByte, err := json.Marshal(txNotify)
 	if err == nil {
@@ -620,6 +641,28 @@ func (w *WalletServiceImpl) GetOrders(query *OrderQuery) (res PageResult, err er
 	return rst, err
 }
 
+// 查询p2p订单, 订单类型固定, market不限
+//func (w *WalletServiceImpl) GetP2pOrders(query *OrderQuery) (res PageResult, err error) {
+//	orderQuery, statusList, pi, ps := convertFromQuery(query)
+//	orderQuery["order_type"] = types.ORDER_TYPE_P2P
+//	if _, ok := orderQuery["market"]; ok {
+//		delete(orderQuery, "market")
+//	}
+//
+//	src, err := w.orderViewer.GetOrders(orderQuery, statusList, pi, ps)
+//	if err != nil {
+//		log.Info("query order error : " + err.Error())
+//	}
+//
+//	rst := PageResult{Total: src.Total, PageIndex: src.PageIndex, PageSize: src.PageSize, Data: make([]interface{}, 0)}
+//
+//	for _, d := range src.Data {
+//		o := d.(types.OrderState)
+//		rst.Data = append(rst.Data, orderStateToJson(o))
+//	}
+//	return rst, err
+//}
+
 func (w *WalletServiceImpl) GetOrderByHash(query OrderQuery) (order OrderJsonResult, err error) {
 	if len(query.OrderHash) == 0 {
 		return order, errors.New("order hash can't be null")
@@ -629,6 +672,30 @@ func (w *WalletServiceImpl) GetOrderByHash(query OrderQuery) (order OrderJsonRes
 			return order, err
 		} else {
 			return orderStateToJson(*state), err
+		}
+	}
+}
+
+func (w *WalletServiceImpl) GetOrdersByHashes(query OrderQuery) (order []OrderJsonResult, err error) {
+	if query.OrderHashes == nil || len(query.OrderHashes) == 0 {
+		return order, errors.New("param orderHashes can't be empty")
+	}
+	if len(query.OrderHashes) > 50 {
+		return order, errors.New("param orderHashes's length can't be over 50")
+	} else {
+		rst := make([]OrderJsonResult, 0)
+		orderHashHex := make([]common.Hash, len(query.OrderHashes))
+		for _, oh := range query.OrderHashes {
+			orderHashHex = append(orderHashHex, common.HexToHash(oh))
+		}
+		orderList, err := w.orderViewer.GetOrdersByHashes(orderHashHex)
+		if err != nil {
+			return order, err
+		} else {
+			for _, order := range orderList {
+				rst = append(rst, orderStateToJson(order))
+			}
+			return rst, err
 		}
 	}
 }
@@ -655,24 +722,19 @@ func (w *WalletServiceImpl) SubmitRingForP2P(p2pRing P2PRingRequest) (res string
 		return res, errors.New(P2P_50003)
 	}
 
+	if taker.RawOrder.AmountS.Cmp(maker.RawOrder.AmountB) != 0 || taker.RawOrder.AmountB.Cmp(maker.RawOrder.AmountS) != 0 {
+		//return res, errors.New("the amount of maker and taker are not matched")
+		return res, errors.New(P2P_50004)
+	}
+
 	if taker.RawOrder.Owner.Hex() == maker.RawOrder.Owner.Hex() {
 		//return res, errors.New("taker and maker's address can't be same")
 		return res, errors.New(P2P_50005)
 	}
 
-	if manager.IsDustyOrder(maker) {
-		//return res, errors.New("It's dusty order")
-		return res, errors.New(P2P_50003)
-	}
-
-	remainedAmountS, _ := maker.RemainedAmount()
-	if pendingAmountB, err := manager.GetP2PPendingAmount(maker.RawOrder.Hash.Hex()); nil != err {
-		if pendingAmountB.Cmp(remainedAmountS) > 0 {
-			//return res, errors.New("maker's remainedAmount is not ")
-			return res, errors.New(P2P_50004)
-		}
-	} else {
-		return res, err
+	if manager.IsP2PMakerLocked(maker.RawOrder.Hash.Hex()) {
+		//return res, errors.New("maker order has been locked by other taker or expired")
+		return res, errors.New(P2P_50006)
 	}
 
 	var txHashRst string
@@ -681,7 +743,7 @@ func (w *WalletServiceImpl) SubmitRingForP2P(p2pRing P2PRingRequest) (res string
 		return res, err
 	}
 
-	err = manager.SaveP2POrderRelation(taker.RawOrder.Owner.Hex(), taker.RawOrder.Hash.Hex(), maker.RawOrder.Owner.Hex(), maker.RawOrder.Hash.Hex(), txHashRst, taker.RawOrder.AmountB.String())
+	err = manager.SaveP2POrderRelation(taker.RawOrder.Owner.Hex(), taker.RawOrder.Hash.Hex(), maker.RawOrder.Owner.Hex(), maker.RawOrder.Hash.Hex(), txHashRst)
 	if err != nil {
 		return res, errors.New(SYS_10001)
 	}
@@ -966,25 +1028,29 @@ func (w *WalletServiceImpl) GetFrozenLRCFee(query SingleOwner) (frozenAmount str
 	return types.BigintToHex(allLrcFee), err
 }
 
-func (w *WalletServiceImpl) GetAllEstimatedAllocatedAmount(query EstimatedAllocatedAllowanceQuery) (resultMap map[string]string, err error) {
+func (w *WalletServiceImpl) GetAllEstimatedAllocatedAmount(query EstimatedAllocatedAllowanceQuery) (result EstimatedAllocatedAllowanceResult, err error) {
 
 	if len(query.Owner) == 0 || len(query.DelegateAddress) == 0 {
-		return resultMap, errors.New("owner and delegateAddress must be applied")
+		return result, errors.New("owner and delegateAddress must be applied")
 	}
 
 	allOrders, err := w.getAllOrdersByOwner(query.Owner, query.DelegateAddress)
 	if err != nil {
-		return resultMap, err
+		return result, err
 	}
 
 	if len(allOrders) == 0 {
-		return resultMap, nil
+		return result, nil
 	}
 
 	tmpResult := make(map[string]*big.Int)
 
 	for _, v := range allOrders {
-		token := util.AddressToAlias(v.RawOrder.TokenS.Hex())
+		token := util.AddressToAlias(v.RawOrder.TokenS.Hex());
+		if len(token) == 0 {
+			continue
+		}
+
 		amountS, _ := v.RemainedAmount()
 		amount, ok := tmpResult[token]
 		if ok {
@@ -994,13 +1060,18 @@ func (w *WalletServiceImpl) GetAllEstimatedAllocatedAmount(query EstimatedAlloca
 		}
 	}
 
-	resultMap = make(map[string]string)
+	resultMap := make(map[string]string)
 
 	for k, v := range tmpResult {
 		resultMap[k] = types.BigintToHex(v)
 	}
 
-	return resultMap, err
+	lrcFee, err := w.GetFrozenLRCFee(SingleOwner{query.Owner});
+	if err != nil {
+		return result, err
+	}
+
+	return EstimatedAllocatedAllowanceResult{resultMap, lrcFee}, err
 }
 
 func (w *WalletServiceImpl) getAllOrdersByOwner(owner, delegateAddress string) (orders []types.OrderState, err error) {
@@ -1179,6 +1250,18 @@ func (w *WalletServiceImpl) TicketCount() (int, error) {
 	return w.rds.TicketCount()
 }
 
+func (w *WalletServiceImpl) AddCustomToken(req AddTokenReq) (result string, err error) {
+	if !util.IsAddress(req.Owner) || !util.IsAddress(req.TokenContractAddress) {
+		return "", errors.New("illegal address format in request")
+	}
+
+	decimals := new(big.Int)
+	decimals.SetInt64(req.Decimals)
+	return req.TokenContractAddress, util.AddToken(
+		common.HexToAddress(req.Owner),
+		util.CustomToken{Address: common.HexToAddress(req.TokenContractAddress), Symbol: req.Symbol, Decimals: decimals})
+}
+
 func convertFromQuery(orderQuery *OrderQuery) (query map[string]interface{}, statusList []types.OrderStatus, pageIndex int, pageSize int) {
 
 	query = make(map[string]interface{})
@@ -1225,7 +1308,7 @@ func convertStatus(s string) []types.OrderStatus {
 	case "ORDER_FINISHED":
 		return []types.OrderStatus{types.ORDER_FINISHED}
 	case "ORDER_CANCELLED":
-		return []types.OrderStatus{types.ORDER_CANCEL, types.ORDER_CUTOFF}
+		return []types.OrderStatus{types.ORDER_CANCEL, types.ORDER_FLEX_CANCEL, types.ORDER_CUTOFF}
 	case "ORDER_CUTOFF":
 		return []types.OrderStatus{types.ORDER_CUTOFF}
 	case "ORDER_EXPIRE":
@@ -1473,8 +1556,19 @@ func (w *WalletServiceImpl) getAvailableMinAmount(depthAmount *big.Rat, owner, t
 	return
 }
 
-func (w *WalletServiceImpl) GetGlobalTrend(req SingleToken) (trend map[string][]market.GlobalTrend, err error) {
-	return w.globalMarket.GetGlobalTrendCache(req.Token)
+func (w *WalletServiceImpl) GetGlobalTrend(req SingleToken) (trend []market.GlobalTrend, err error) {
+	if len(req.Token) == 0 {
+		return nil, errors.New("token required")
+	}
+	tokenMap, err := w.globalMarket.GetGlobalTrendCache(req.Token);
+	if err != nil {
+		return nil, err
+	}
+	return tokenMap[req.Token], err
+}
+
+func (w *WalletServiceImpl) GetAllGlobalTrend(req SingleToken) (trend map[string][]market.GlobalTrend, err error) {
+	return w.globalMarket.GetGlobalTrendCache("")
 }
 
 func (w *WalletServiceImpl) GetGlobalTicker(req SingleToken) (ticker map[string]market.GlobalTicker, err error) {
@@ -1543,9 +1637,19 @@ func (w *WalletServiceImpl) FlexCancelOrder(req CancelOrderQuery) (rst string, e
 	err = manager.FlexCancelOrder(&cancelOrderEvent)
 	if err == nil {
 		go func() {
-			ot, err := w.orderViewer.GetOrderByHash(cancelOrderEvent.OrderHash)
-			if err != nil {
-				kafkaUtil.ProducerSocketIOMessage(kafka.Kafka_Topic_SocketIO_Order_Updated, ot)
+
+			orderQuery := OrderQuery{Owner: req.Sign.Owner, OrderType: types.ORDER_TYPE_MARKET}
+			if cancelOrderEvent.Type == types.FLEX_CANCEL_BY_HASH {
+				orderQuery.OrderHash = cancelOrderEvent.OrderHash.Hex()
+			} else if cancelOrderEvent.Type == types.FLEX_CANCEL_BY_MARKET {
+				orderQuery.Market, _ = util.WrapMarketByAddress(req.TokenS, req.TokenB)
+			} else {
+				// other conditions will notify all market, not implement now
+			}
+			orderQueryMap, _, _, _ := convertFromQuery(&orderQuery)
+			ot, err := w.orderViewer.GetLatestOrders(orderQueryMap, 1)
+			if err == nil && len(ot) > 0 {
+				kafkaUtil.ProducerSocketIOMessage(kafka.Kafka_Topic_SocketIO_Order_Updated, ot[0])
 			}
 		}()
 	}
@@ -1774,6 +1878,8 @@ func toLatestFill(f dao.FillEvent) (latestFill LatestFill, err error) {
 	rst.LrcFee = f.LrcFee
 	rst.SplitS = f.SplitS
 	rst.SplitB = f.SplitB
+	rst.OrderHash = f.OrderHash
+	rst.PreOrderHash = f.PreOrderHash
 	var amount float64
 	if util.GetSide(f.TokenS, f.TokenB) == util.SideBuy {
 		amountB, _ := new(big.Int).SetString(f.AmountB, 0)
