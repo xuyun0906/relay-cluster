@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"github.com/Loopring/relay-cluster/dao"
 	"github.com/Loopring/relay-lib/eventemitter"
+	"github.com/Loopring/relay-lib/log"
 	"github.com/Loopring/relay-lib/marketutil"
 	"github.com/Loopring/relay-lib/types"
 	"github.com/ethereum/go-ethereum/common"
@@ -30,13 +31,12 @@ import (
 	"math/rand"
 	"sync"
 	"time"
-	"github.com/Loopring/relay-lib/log"
 )
 
 type CityPartnerStatus struct {
 	CustomerCount int               `json:"customer_count"`
 	Received      map[string]string `json:"received"`
-	WalletAddress string `json:"walletAddress"`
+	WalletAddress string            `json:"walletAddress"`
 }
 
 func (w *WalletServiceImpl) CreateCityPartner(req *dao.CityPartner) (isSuccessed bool, err error) {
@@ -65,7 +65,7 @@ func (w *WalletServiceImpl) CreateCustumerInvitationInfo(req *dao.CustumerInvita
 	info := &dao.CustumerInvitationInfo{}
 	info.InvitationCode = req.InvitationCode
 	info.Activate = 0
-	if _,err := w.rds.FindCityPartnerByInvitationCode(info.InvitationCode); nil != err {
+	if _, err := w.rds.FindCityPartnerByInvitationCode(info.InvitationCode); nil != err {
 		return "", err
 	} else {
 		activateCodes, err := w.rds.GetAllActivateCode(info.InvitationCode)
@@ -100,7 +100,7 @@ func (w *WalletServiceImpl) ActivateCustumerInvitation(req *dao.CustumerInvitati
 	} else {
 		info.Activate = info.Activate + 1
 		err = w.rds.AddCustumerInvitationActivate(info)
-		res,err = w.rds.FindCityPartnerByInvitationCode(info.InvitationCode)
+		res, err = w.rds.FindCityPartnerByInvitationCode(info.InvitationCode)
 		return res, err
 	}
 }
